@@ -1,11 +1,17 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 import { serverRoutes } from './routes/server.routes.js';
 import { initSocket } from './utils/socket.js';
+import { fileRoutes } from './routes/file.routes.js';
+import { metaRoutes } from './routes/meta.routes.js';
 
 const fastify = Fastify({ logger: false });
 
+fastify.register(multipart)
+fastify.register(metaRoutes);
 fastify.register(serverRoutes, { prefix: '/servers' });
+fastify.register(fileRoutes, { prefix: '/servers' });
 
 await fastify.register(cors, {
   origin: "*",

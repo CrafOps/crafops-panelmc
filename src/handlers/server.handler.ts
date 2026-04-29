@@ -3,12 +3,13 @@ import { docker } from '../utils/docker.js';
 import path from 'path';
 import fs from 'fs';
 
-// --- Helper: ระบบความปลอดภัยของ Path ---
 const SAFE_ROOT = path.resolve('./data/servers');
 
+/**
+ * ตรวจสอบและสร้าง Path ที่ปลอดภัยสำหรับเก็บข้อมูล Minecraft
+ */
 const getSafePath = (serverName: string) => {
   const targetPath = path.resolve(SAFE_ROOT, serverName);
-  // ตรวจสอบว่า Path ที่ได้ต้องอยู่ภายใต้ SAFE_ROOT เท่านั้น (ป้องกัน ../../../)
   if (!targetPath.startsWith(SAFE_ROOT)) {
     throw new Error('Security Breach: Attempted to access path outside of data directory');
   }
@@ -18,25 +19,32 @@ const getSafePath = (serverName: string) => {
 interface CreateServerBody {
   serverName: string;
   port: number;
+  version?: string;
+  serverType: 'java' | 'bedrock';
 }
 
-// 1. สร้างเซิร์ฟเวอร์
+/**
+ * Handler สำหรับสร้างเซิร์ฟเวอร์ใหม่
+ */
 export const createServerHandler = async (request: FastifyRequest, reply: FastifyReply) => {
   try {
-    const { serverName, port } = request.body as CreateServerBody;
-    const imageName = 'itzg/minecraft-bedrock-server:latest';
+    const { serverName, port, version = 'LATEST', serverType } = request.body as CreateServerBody;
 
-    if (!serverName || !port) {
-      return reply.status(400).send({ error: 'Missing serverName or port' });
+    if (!serverName || !port || !serverType) {
+      return reply.status(400).send({ error: 'Missing required fields: serverName, port, or serverType' });
     }
 
+    // กำหนด Image และ Internal Port ตามประเภทเซิร์ฟเวอร์
+    const baseImage = serverType === 'java' ? 'itzg/minecraft-server' : 'itzg/minecraft-bedrock-server';
+    const imageName = `${baseImage}:latest`; 
+    const internalPort = serverType === 'java' ? '25565/tcp' : '19132/udp';
+
     const serverDataPath = getSafePath(serverName);
-    
     if (!fs.existsSync(serverDataPath)) {
       fs.mkdirSync(serverDataPath, { recursive: true });
     }
 
-    // Pull Image Logic
+    // เช็คและดึง Image
     const images = await docker.listImages();
     const hasImage = images.some(img => img.RepoTags?.includes(imageName));
 
@@ -50,34 +58,46 @@ export const createServerHandler = async (request: FastifyRequest, reply: Fastif
       });
     }
 
+    // สร้าง Container พร้อม Config ตาม Server Type
     const container = await docker.createContainer({
       Image: imageName,
       name: serverName,
       Labels: {
         "com.docker.compose.project": "MC-Panel", 
         "com.docker.compose.service": serverName,
-        "created-by": "@PPekKunGzDev"
+        "created-by": "@PPekKunGzDev",
+        "mc-type": serverType // ระบุประเภทไว้ใช้ตอน List
       },
-      Env: ['EULA=TRUE', 'GAMEMODE=survival', 'DIFFICULTY=easy'],
-      ExposedPorts: { '19132/udp': {} },
+      Env: [
+        'EULA=TRUE', 
+        `VERSION=${version.toUpperCase()}`,
+        'GAMEMODE=survival', 
+        'DIFFICULTY=easy',
+        'ENABLE_AUTOPAUSE=false' // ปิดโหมดหลับถ้าไม่มีคนเล่น เพื่อความไหลลื่น
+      ],
+      ExposedPorts: { [internalPort]: {} },
       HostConfig: {
         Binds: [`${serverDataPath}:/data`],
-        PortBindings: { '19132/udp': [{ HostPort: port.toString() }] },
-        Memory: 1024 * 1024 * 1024,
+        PortBindings: { 
+          [internalPort]: [{ HostPort: port.toString() }] 
+        },
+        Memory: serverType === 'java' ? 2048 * 1024 * 1024 : 1024 * 1024 * 1024, // Java ให้ 2GB, Bedrock 1GB
         RestartPolicy: { Name: 'unless-stopped' }
       }
     });
 
     await container.start();
-    return { status: 'Created', containerId: container.id, storagePath: serverDataPath };
+    return { status: 'Created', containerId: container.id, serverType, version };
 
   } catch (error: any) {
-    if (error.statusCode === 409) return reply.status(409).send({ error: 'Server name exists' });
+    if (error.statusCode === 409) return reply.status(409).send({ error: 'Server name already exists' });
     return reply.status(500).send({ error: error.message });
   }
 };
 
-// 2. ควบคุมสถานะ (Start/Stop/Restart) พร้อมเช็คสถานะปัจจุบัน
+/**
+ * Handler สำหรับสั่งการ Start/Stop/Restart
+ */
 export const powerActionHandler = async (request: FastifyRequest, reply: FastifyReply) => {
   try {
     const { action } = request.params as { action: 'start' | 'stop' | 'restart' };
@@ -87,7 +107,6 @@ export const powerActionHandler = async (request: FastifyRequest, reply: Fastify
     const inspect = await container.inspect();
     const isRunning = inspect.State.Running;
 
-    // ดักเคสซ้ำซ้อน
     if (action === 'start' && isRunning) return { message: 'Server is already running' };
     if (action === 'stop' && !isRunning) return { message: 'Server is already stopped' };
 
@@ -101,7 +120,9 @@ export const powerActionHandler = async (request: FastifyRequest, reply: Fastify
   }
 };
 
-// 3. ลบเซิร์ฟเวอร์ (2 Modes: Instance Only / Everything)
+/**
+ * Handler สำหรับลบเซิร์ฟเวอร์
+ */
 export const deleteServerHandler = async (request: FastifyRequest, reply: FastifyReply) => {
   try {
     const { containerId, serverName, deleteData = false } = request.body as { 
@@ -111,56 +132,45 @@ export const deleteServerHandler = async (request: FastifyRequest, reply: Fastif
     };
 
     const container = docker.getContainer(containerId);
-
-    // ลบคอนเทนเนอร์ทันที (Force)
     await container.remove({ force: true });
 
-    // ถ้าสั่งลบข้อมูลถาวร
     if (deleteData && serverName) {
       const targetDir = getSafePath(serverName);
       if (fs.existsSync(targetDir)) {
         fs.rmSync(targetDir, { recursive: true, force: true });
-        return { status: 'Deleted everything (Container + Files)' };
+        return { status: 'Deleted: Container and Data' };
       }
     }
 
-    return { status: 'Container deleted, data preserved' };
+    return { status: 'Deleted: Container only' };
   } catch (error: any) {
     return reply.status(500).send({ error: error.message });
   }
 };
 
-//List Server on Container
+/**
+ * Handler สำหรับลิสต์รายการเซิร์ฟเวอร์ทั้งหมดในโปรเจกต์
+ */
 export const listServersHandler = async (request: FastifyRequest, reply: FastifyReply) => {
   try {
-    // กรองเฉพาะ Container ที่มี Label ของโปรเจกต์เรา
     const containers = await docker.listContainers({
-      all: true, // เอามาทั้งที่รันอยู่และที่หยุดไปแล้ว
-      filters: {
-        label: ["com.docker.compose.project=MC-Panel"]
-      }
+      all: true,
+      filters: { label: ["com.docker.compose.project=MC-Panel"] }
     });
 
-    const serverList = containers.map(container => {
-      return {
-        id: container.Id,
-        name: (container.Names && container.Names[0]) 
-                ? container.Names[0].replace('/', '') 
-                : 'unknown-server',
-    
-        state: container.State,
-        status: container.Status,
-        image: container.Image,
-    
-        ports: (container.Ports || []).map(p => ({
-          public: p.PublicPort,
-          private: p.PrivatePort,
-          type: p.Type
-        }))
-      };
-    });
-
-    return serverList;
+    return containers.map(container => ({
+      id: container.Id,
+      name: container.Names[0]?.replace('/', '') || 'unknown',
+      state: container.State,
+      status: container.Status,
+      image: container.Image,
+      type: container.Labels["mc-type"] || 'bedrock', // ดึงประเภทจาก Label
+      ports: (container.Ports || []).map(p => ({
+        public: p.PublicPort,
+        private: p.PrivatePort,
+        type: p.Type
+      }))
+    }));
   } catch (error: any) {
     return reply.status(500).send({ error: error.message });
   }

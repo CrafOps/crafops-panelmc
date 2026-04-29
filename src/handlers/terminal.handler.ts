@@ -9,8 +9,6 @@ export const streamLogs = async (containerId: string, socket: Socket) => {
   const container = docker.getContainer(containerId);
 
   try {
-    // [1] ส่ง Log ย้อนหลังให้คนที่เพิ่งเข้ามาทันที (Buffer)
-    // ไม่ว่าท่อจะ Active อยู่หรือไม่ คนมาใหม่ต้องเห็น Log เก่าก่อน
     const existingLogs = await container.logs({
       stdout: true,
       stderr: true,
@@ -20,13 +18,10 @@ export const streamLogs = async (containerId: string, socket: Socket) => {
     
     socket.emit('log-data', existingLogs.toString('utf-8'));
 
-    // [2] ถ้ามี Stream ค้างไว้สำหรับ Container นี้อยู่แล้ว ไม่ต้องสร้างท่อใหม่
     if (activeStreams.has(containerId)) {
       console.log(`ℹ️ Client ${socket.id} attached to existing stream: ${containerId}`);
       return;
     }
-
-    // [3] ถ้ายังไม่มีท่อ ให้สร้างท่อใหม่ (Follow)
     const logStream = (await container.logs({
       follow: true,
       stdout: true,
