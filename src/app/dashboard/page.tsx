@@ -1,11 +1,13 @@
 'use client';
 import { useEffect, useState } from 'react';
 import ServerCard from '@/components/ServerCard';
+import CreateServerModal from '@/components/CreateServerModal';
 import { MinecraftServer } from '@/types/server';
 import { DockerService } from '@/service/docker.service';
 
 export default function Dashboard() {
   const [servers, setServers] = useState<MinecraftServer[]>([]);
+  const [isModalOpen, setIsModalOpen] = useState(false);
 
   const fetchServers = async () => {
     try {
@@ -25,7 +27,7 @@ export default function Dashboard() {
   const handleAction = async (id: string, action: any) => {
     await DockerService.powerAction(id, action);
     fetchServers();
-};
+  };
 
   return (
     <main className="min-h-screen bg-[#0a0a0c] p-8 text-white">
@@ -37,6 +39,13 @@ export default function Dashboard() {
             </h1>
             <p className="text-gray-400 mt-2">Manage your Bedrock servers with style.</p>
           </div>
+
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="bg-purple-600 hover:bg-purple-700 px-6 py-2 rounded-xl font-bold transition-all shadow-lg shadow-purple-500/20 active:scale-95"
+          >
+            + New Server
+          </button>
         </header>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -50,6 +59,13 @@ export default function Dashboard() {
           ))}
         </div>
       </div>
+
+      {isModalOpen && (
+        <CreateServerModal 
+          onClose={() => setIsModalOpen(false)} 
+          onRefresh={fetchServers} 
+        />
+      )}
     </main>
   );
 }
